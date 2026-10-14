@@ -1,0 +1,16 @@
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+build/
+dist/
+runs/
+.env
+.env.*
+cookies*.txt
+*.mp4
+*.mkv
+*.webm
+*.wav
+*.log
+config.local.json

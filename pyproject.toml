@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "chzzk-shorts-demo"
+version = "0.1.0"
+description = "CHZZK two-hour VOD highlight discovery demo"
+requires-python = ">=3.11"
+dependencies = ["yt-dlp>=2025.3.25", "numpy>=1.26,<3"]
+
+[project.optional-dependencies]
+gpu = ["faster-whisper>=1.2,<2"]
+ai = ["google-genai>=1,<2"]
+
+[project.scripts]
+chzzk-demo = "chzzk_demo.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
