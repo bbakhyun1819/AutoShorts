@@ -108,7 +108,11 @@ def combine(args):
     items = []
     for name in ("signal-candidates.json", "text-candidates.json", "manual-candidates.json"):
         if (job / name).exists():
-            items.extend(read(job / name))
+            candidates = read(job / name)
+            if name == "text-candidates.json":
+                from .assistant import validate_text_result
+                validate_text_result(job, candidates)
+            items.extend(candidates)
     merged = merge_candidates(items)
     save(job / "candidates.json", merged)
     print(f"전체 {len(merged)}개 저장. 임의로 상위 후보만 남기지 않습니다.")

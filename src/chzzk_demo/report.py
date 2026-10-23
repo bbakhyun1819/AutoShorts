@@ -4,8 +4,66 @@ import html
 import json
 from pathlib import Path
 
-from .core import read, stamp
+from .core import fingerprint, read, stamp
 from .media import extract
+
+
+def applicable_reviews(job, items):
+    """Choose the newest review that still applies to a current candidate."""
+    candidates = {item["id"]: item for item in items}
+    reviews = {}
+    current_fingerprint = None
+    for path in sorted((job / "reviews").glob("*.json"),
+                       key=lambda p: (p.stat().st_mtime_ns, p.name)):
+        value = read(path)
+        candidate = candidates.get(value.get("candidate_id"))
+        if candidate is None:
+            continue
+        if value.get("provider") == "assistant":
+            if value.get("candidate_signature") != fingerprint(candidate):
+                continue
+            if value.get("evidence") not in {"transcript", "sampled_frames"}:
+                continue
+            if current_fingerprint is None:
+                from .assistant import input_fingerprint
+                current_fingerprint = input_fingerprint(job, "review")
+            if value.get("input_fingerprint") != current_fingerprint:
+                continue
+        reviews[value["candidate_id"]] = value
+    return reviews
+
+
+def review_label(value):
+    if value.get("provider") == "assistant":
+        if value["evidence"] == "sampled_frames":
+            return "Codex 표본 프레임 검토 (전체 영상·음성 미검토)"
+        return "Codex 대본 검토 (영상·음성 미검토)"
+    model = value.get("model")
+    return f"Gemini 영상 검토 ({model})" if model else "Gemini 영상 검토"
+
+
+def semantic_status(job):
+    path = job / "text-candidates.json"
+    if not path.exists():
+        return "대본 의미 분석 미실행"
+    items = read(path)
+    metadata_path = job / "text-analysis.json"
+    metadata = read(metadata_path) if metadata_path.exists() else {}
+    assistant_items = any("assistant" in item.get("sources", []) for item in items)
+    if not assistant_items and not (not items and metadata.get("provider") == "assistant"):
+        return "대본 의미 분석 완료 (Gemini)"
+    if (metadata.get("provider") != "assistant"
+            or metadata.get("candidates_fingerprint") != fingerprint(items)):
+        return "Codex 대본 분석 상태 확인 필요 (결과 정보 불일치)"
+    from .assistant import input_fingerprint
+    if metadata.get("input_fingerprint") != input_fingerprint(job, "text"):
+        return "Codex 대본 분석 결과 오래됨 (입력 변경, 다시 분석 필요)"
+    reviewed = metadata.get("reviewed_windows", [])
+    total = metadata.get("total_windows")
+    completed = len(set(reviewed))
+    if metadata.get("complete") is True and type(total) is int and completed == total:
+        return f"Codex 대본 의미 분석 완료 ({completed}/{total}구간)"
+    return f"Codex 대본 의미 분석 일부 완료 ({completed}/{total}구간)"
 
 
 def report(args):
@@ -14,10 +72,7 @@ def report(args):
     items = read(job / "candidates.json") if (job / "candidates.json").exists() else []
     messages = read(job / "chats.json") if (job / "chats.json").exists() else []
     words = read(job / "transcript.json") if (job / "transcript.json").exists() else []
-    reviews = {}
-    for path in sorted((job / "reviews").glob("*.json"), key=lambda p: p.stat().st_mtime):
-        value = read(path)
-        reviews[value["candidate_id"]] = value
+    reviews = applicable_reviews(job, items)
     rows = []
     for item in items:
         item = dict(item)
@@ -26,6 +81,7 @@ def report(args):
                         for m in messages if item["start"] <= m["time"]+config.get("chat_offset", 0) < item["end"]]
         item["transcript"] = " ".join(w["text"] for w in words if item["start"] <= w["start"] < item["end"])
         item["review"] = reviews.get(item["id"])
+        item["review_label"] = review_label(item["review"]) if item["review"] else None
         rows.append(item)
     payload = json.dumps(rows, ensure_ascii=False).replace("<", "\\u003c").replace("&", "\\u0026")
     page = """<!doctype html><html lang="ko"><meta charset="utf-8">
@@ -47,15 +103,23 @@ if(c.clip){let v=el('video');v.controls=true;v.preload='metadata';v.src=c.clip;l
 v.ontimeupdate=()=>{chat.replaceChildren(...c.chat.filter(m=>m.time<=v.currentTime&&m.time>v.currentTime-15).slice(-30).map(m=>el('p',m.text)));};}
 else left.append(el('p','아직 클립을 생성하지 않은 후보입니다. clips --limit 값을 늘려 실행하세요.'));
 grid.append(left,chat);a.append(grid);let d=el('details');d.append(el('summary','대본 보기'),el('p',c.transcript||'대본 없음'));a.append(d);
-if(c.review)a.append(el('p',`AI: ${c.review.status} / ${c.review.reason} / 제안 원본 구간 ${c.review.source_start.toFixed(1)}–${c.review.source_end.toFixed(1)}초`));
+if(c.review)a.append(el('p',`${c.review_label}: ${c.review.status} / ${c.review.reason} / 제안 원본 구간 ${c.review.source_start.toFixed(1)}–${c.review.source_end.toFixed(1)}초`));
 let s=el('select');for(const t of ['미검토','편집 선택','보류','제외'])s.append(el('option',t));
 c.human_decision='미검토';s.onchange=()=>c.human_decision=s.value;a.append(s);root.append(a);}
 if(!data.length)root.append(el('p','후보가 없습니다. 분석 실행 여부를 확인하거나 수동 후보를 추가하세요.'));
-document.getElementById('download').onclick=()=>{let out=data.map(({chat,transcript,clip,...x})=>x);
+document.getElementById('download').onclick=()=>{let out=data.map(({chat,transcript,clip,review_label,...x})=>x);
 let u=URL.createObjectURL(new Blob([JSON.stringify(out,null,2)],{type:'application/json'}));let a=el('a');a.href=u;a.download='decisions.json';a.click();setTimeout(()=>URL.revokeObjectURL(u),1000);};
 </script></html>"""
-    semantic = "대본 의미 분석 완료" if (job / "text-candidates.json").exists() else "대본 의미 분석 미실행"
-    status = f"분석 범위 {stamp(config['start'])}~{stamp(config['end'])} · 싱크: {config.get('sync_status', 'unverified')} · 채팅 보정 {config.get('chat_offset', 0)}초 · {semantic} · AI 영상 검토 {len(reviews)}개"
+    semantic = semantic_status(job)
+    transcript_count = sum(v.get("provider") == "assistant" and v.get("evidence") == "transcript"
+                           for v in reviews.values())
+    frames_count = sum(v.get("provider") == "assistant" and v.get("evidence") == "sampled_frames"
+                      for v in reviews.values())
+    video_count = len(reviews) - transcript_count - frames_count
+    status = (f"분석 범위 {stamp(config['start'])}~{stamp(config['end'])} · 싱크: {config.get('sync_status', 'unverified')}"
+              f" · 채팅 보정 {config.get('chat_offset', 0)}초 · {semantic}"
+              f" · Codex 대본 검토 {transcript_count}개 · Codex 표본 프레임 검토 {frames_count}개"
+              f" · Gemini 영상 검토 {video_count}개 (현재 후보에 연결된 최신 검토)")
     page = page.replace("__STATUS__", html.escape(status)).replace("__DATA__", payload)
     (job / "report.html").write_text(page, encoding="utf-8")
     print(f"검수 페이지: {(job / 'report.html').resolve()}")

@@ -18,8 +18,8 @@ def ingest(args):
     job.mkdir(parents=True, exist_ok=True)
     if (job / "job.json").exists():
         raise ValueError("이 작업 폴더는 이미 등록되어 있습니다. 새 폴더를 지정하거나 후속 단계를 실행하세요.")
-    if not 0 < args.duration <= 7200 or args.start < 0:
-        raise ValueError("데모 분석 길이는 0초 초과 7200초 이하, 시작은 0초 이상입니다.")
+    if args.duration <= 0 or args.start < 0:
+        raise ValueError("분석 길이는 0초 초과, 시작은 0초 이상입니다.")
     if args.local_video:
         video = Path(args.local_video).resolve()
         if not video.is_file():
@@ -30,13 +30,16 @@ def ingest(args):
         if not match:
             raise ValueError("https://chzzk.naver.com/video/영상번호 형식의 URL이 필요합니다.")
         video_id = match.group(1)
-        # Preserve the complete original; only analysis is capped to two hours.
+        # Preserve the complete source at the chosen quality; limit analysis to the requested range.
         listing = job / "downloaded-path.txt"
         command = [sys.executable, "-m", "yt_dlp", "--no-playlist", "--write-info-json",
+                   "--concurrent-fragments", "8", "--progress-delta", "10",
                    "--merge-output-format", "mp4", "-o", str(job / "source.%(ext)s"),
                    "--print-to-file", "after_move:filepath", str(listing)]
         if args.cookies:
             command += ["--cookies", args.cookies]
+        if getattr(args, "format", None):
+            command += ["--format", args.format]
         run(command + [args.url])
         video = Path(listing.read_text(encoding="utf-8").strip().splitlines()[-1]).resolve()
     meta = probe(video)
