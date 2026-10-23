@@ -67,6 +67,8 @@ def text_candidates(args):
         print(f"대본 의미 분석 {int(start)}~{int(b)}초 완료", flush=True)
         start += 600
     save(job / "text-candidates.json", items)
+    save(job / "text-analysis.json", {"provider": "gemini", "model": model,
+                                      "candidates_fingerprint": fingerprint(items), "complete": True})
     save(job / "ai-rejected.json", rejected)
 
 

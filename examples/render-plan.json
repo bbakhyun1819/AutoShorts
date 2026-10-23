@@ -1,0 +1,16 @@
+{
+  "slug": "story-sample",
+  "source": "../runs/demo/source.mp4",
+  "source_start": 0,
+  "logo": "../runs/assets/channel-logo.png",
+  "font": "C:/Windows/Fonts/malgunbd.ttf",
+  "font_name": "맑은 고딕",
+  "channel": "채널 이름",
+  "title_lines": ["이야기의 도입", "궁금해지는 제목"],
+  "keep": [[60, 74], [82, 98]],
+  "captions": [
+    {"start": 60.2, "end": 63.5, "text": "여기에 실제 도입 대사를 입력하세요"},
+    {"start": 82.2, "end": 85.5, "text": "다음 구간의 실제 대사를 입력하세요"},
+    {"start": 94, "end": 97.5, "text": "마지막 답변이나 반응을 남겨주세요", "style": "Punchline"}
+  ]
+}
