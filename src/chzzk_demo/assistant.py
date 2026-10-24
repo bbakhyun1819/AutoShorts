@@ -33,6 +33,10 @@ def input_fingerprint(job, stage):
     data = {"job": str(job), "config": config,
             "source": _file_stamp(config["video"]) if config.get("video") else None,
             "transcript": read(job / "transcript.json")}
+    # A web-studio request is part of the analysis input. Changing it makes old
+    # responses stale instead of accepting results prepared for another request.
+    if (job / "studio-request.json").is_file():
+        data["studio_request"] = read(job / "studio-request.json")
     if stage == "text":
         for name in ("chat-bins.json", "signal-candidates.json"):
             data[name] = _optional(job, name, [])

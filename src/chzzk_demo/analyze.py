@@ -122,6 +122,11 @@ def clips(args):
     job = Path(args.job)
     config = read(job / "job.json")
     candidates = read(job / "candidates.json")
+    selected = getattr(args, "candidate_id", None)
+    if selected:
+        if set(selected) - {item["id"] for item in candidates}:
+            raise ValueError("목록에 없는 후보 ID입니다.")
+        candidates = [item for item in candidates if item["id"] in selected]
     for item in candidates[:args.limit]:
         output = job / "clips" / f"{item['id']}.mp4"
         if not output.exists():
