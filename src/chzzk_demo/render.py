@@ -14,6 +14,45 @@ from .media import probe, require_tools
 
 STYLES = {"Caption": 58, "Emphasis": 60, "Punchline": 76}
 SLUG = re.compile(r"[a-z0-9][a-z0-9_-]{0,63}\Z")
+DESIGN_DEFAULTS = {
+    "title": {"x": 540, "y": 439, "size": 76, "line_gap": 88},
+    "caption": {"x": 540, "y": 1435, "size": 58, "emphasis_size": 60, "punchline_size": 76},
+    "channel": {"x": None, "y": 1650, "size": 92},
+    "logo": {"x": 365, "y": 1572, "size": 156},
+    "context": {"x": 540, "y": 293, "size": 34},
+}
+
+
+def normalize_design(value=None):
+    """Merge optional layout overrides with the approved 1080 x 1920 design."""
+    value = {} if value is None else value
+    if not isinstance(value, dict) or set(value) - set(DESIGN_DEFAULTS):
+        raise ValueError("design: title, caption, channel, logo, context 설정만 사용할 수 있습니다.")
+    design = {}
+    for layer, defaults in DESIGN_DEFAULTS.items():
+        override = value.get(layer, {})
+        if not isinstance(override, dict) or set(override) - set(defaults):
+            raise ValueError(f"design.{layer}: 알 수 없는 디자인 설정입니다.")
+        settings = {**defaults, **override}
+        for key, item in settings.items():
+            if layer == "channel" and key == "x" and item is None:
+                continue
+            number = _number(item, f"design.{layer}.{key}")
+            if key in {"x", "y"}:
+                maximum = 1080 if key == "x" else 1920
+                if not 0 <= number <= maximum:
+                    raise ValueError(f"design.{layer}.{key}: 0~{maximum} 범위여야 합니다.")
+                settings[key] = round(number, 2)
+            else:
+                low, high = (16, 1080) if layer == "logo" else (0, 480) if key == "line_gap" else (12, 240)
+                if not low <= number <= high or not number.is_integer():
+                    raise ValueError(f"design.{layer}.{key}: {low}~{high} 범위의 정수여야 합니다.")
+                settings[key] = int(number)
+        design[layer] = settings
+    logo = design["logo"]
+    if logo["x"] + logo["size"] > 1080 or logo["y"] + logo["size"] > 1920:
+        raise ValueError("design.logo: 로고 전체가 캔버스 안에 들어가야 합니다.")
+    return design
 
 
 def _number(value, label):
@@ -118,7 +157,7 @@ def validate_plan(plan, *, source_duration, source_width, source_height):
         raise ValueError("crop: 원본 화면 안에 들어가는 4:3 사각형이 필요합니다.")
     return dict(slug=slug, title_lines=title, channel=channel, font_name=font_name,
                 source_start=offset, keep=ranges, captions=normalized, context=notes,
-                crop=dict(crop), duration_seconds=total)
+                crop=dict(crop), duration_seconds=total, design=normalize_design(plan.get("design")))
 
 
 def transform_captions(plan):
@@ -146,7 +185,8 @@ def ass_text(text):
     return text.replace("\\", "＼").replace("{", "｛").replace("}", "｝").replace("\n", r"\N")
 
 
-def _subtitles(plan, captions, font_path):
+def _text_layers(plan, captions, font_path):
+    """Shared text geometry for ASS output and the interactive preview handles."""
     try:
         from PIL import ImageFont
     except ImportError as exc:
@@ -154,13 +194,72 @@ def _subtitles(plan, captions, font_path):
 
     def fit(text, size, max_width=920):
         text = ass_text(text).replace(r"\N", "\n")
-        while size >= 32:
+        minimum = min(32, size)
+        while size >= minimum:
             font = ImageFont.truetype(str(font_path), size)
             if max(font.getlength(line) for line in text.split("\n")) <= max_width:
                 return size
             size -= 1
         raise ValueError("문장이 화면 폭을 넘습니다. 제목·자막을 줄이거나 자막을 두 줄로 나누세요.")
 
+    design = normalize_design(plan.get("design"))
+    layers = []
+
+    def layer(identifier, kind, a, b, style, text, size, x, y, width=920):
+        fitted = fit(text, size, width)
+        font = ImageFont.truetype(str(font_path), fitted)
+        escaped = ass_text(text).replace(r"\N", "\n")
+        lines = escaped.split("\n")
+        ascent, descent = font.getmetrics()
+        color = "#00ffaa" if style in {"Emphasis", "Punchline"} else "#b8b8b8" if style == "Context" else "#ffffff"
+        layers.append(dict(id=identifier, kind=kind, start=a, end=b, style=style, text=text,
+                           x=x, y=y, size=fitted, requested_size=size, color=color,
+                           width=round(max(font.getlength(line) for line in lines), 2),
+                           height=(ascent + descent) * len(lines)))
+
+    duration = plan["duration_seconds"]
+    title = design["title"]
+    positions = [title["y"] - title["line_gap"] / 2, title["y"] + title["line_gap"] / 2] if len(plan["title_lines"]) == 2 else [title["y"]]
+    for i, (y, text) in enumerate(zip(positions, plan["title_lines"])):
+        layer(f"title-{i}", "title", 0, duration, "Title", text, title["size"], title["x"], y)
+    channel = design["channel"]
+    name_size = fit(plan["channel"], channel["size"], 490)
+    name_width = ImageFont.truetype(str(font_path), name_size).getlength(plan["channel"])
+    name_x = round(521 + name_width / 2) if channel["x"] is None else channel["x"]
+    layer("channel", "channel", 0, duration, "Channel", plan["channel"], channel["size"], name_x, channel["y"], 490)
+    caption = design["caption"]
+    sizes = {"Caption": caption["size"], "Emphasis": caption["emphasis_size"], "Punchline": caption["punchline_size"]}
+    for i, cue in enumerate(captions):
+        layer(f"caption-{i}", "caption", cue["start"], cue["end"], cue["style"], cue["text"], sizes[cue["style"]], caption["x"], caption["y"])
+    context = design["context"]
+    for i, cue in enumerate(plan["context"]):
+        layer(f"context-{i}", "context", cue["start"], cue["end"], "Context", cue["text"], context["size"], context["x"], context["y"])
+    return layers
+
+
+def preview_layout(plan, font_path, output_time=0):
+    """Return active text centres and logo top-left coordinates in canvas pixels."""
+    moment = _number(output_time, "preview time")
+    if not 0 <= moment < plan["duration_seconds"]:
+        raise ValueError("미리보기 시각은 완성 영상의 0 이상, 길이 미만이어야 합니다.")
+    design = normalize_design(plan.get("design"))
+    layers = [item for item in _text_layers(plan, transform_captions(plan), font_path)
+              if item["start"] <= moment < item["end"]]
+    weight, italic = _font_style(font_path)
+    return dict(canvas=[1080, 1920], panel=[0, 555, 1080, 810], logo=dict(design["logo"]),
+                layers=layers, font_weight=weight, font_style="italic" if italic else "normal")
+
+
+def _font_style(font_path):
+    from PIL import ImageFont
+    style = ImageFont.truetype(str(font_path), 32).getname()[1].lower()
+    return (700 if any(word in style for word in ("bold", "black", "heavy", "demi")) else 400,
+            "italic" in style or "oblique" in style)
+
+
+def _subtitles(plan, captions, font_path):
+    design = normalize_design(plan.get("design"))
+    weight, italic = _font_style(font_path)
     header = """[Script Info]
 ScriptType: v4.00+
 PlayResX: 1080
@@ -171,36 +270,37 @@ ScaledBorderAndShadow: yes
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
 """
-    for name, size in {"Title": 76, "Channel": 92, **STYLES, "Context": 34}.items():
+    sizes = {"Title": design["title"]["size"], "Channel": design["channel"]["size"],
+             "Caption": design["caption"]["size"], "Emphasis": design["caption"]["emphasis_size"],
+             "Punchline": design["caption"]["punchline_size"], "Context": design["context"]["size"]}
+    for name, size in sizes.items():
         color = "&H00AAFF00" if name in {"Emphasis", "Punchline"} else "&H00FFFFFF"
         if name == "Context":
             color = "&H00B8B8B8"
         outline, shadow = (4, 1) if name == "Caption" else (0, 0)
         header += (f"Style: {name},{plan['font_name']},{size},{color},&H000000FF,&H0017100C,"
-                   f"&H80000000,-1,0,0,0,100,100,0,0,1,{outline},{shadow},5,40,40,0,1\n")
+                   f"&H80000000,{-1 if weight >= 700 else 0},{-1 if italic else 0},0,0,100,100,0,0,1,{outline},{shadow},5,40,40,0,1\n")
     header += "\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
-    events = []
-
-    def event(a, b, style, text, size, x=540, y=1435, width=920):
-        fitted = fit(text, size, width)
-        events.append(f"Dialogue: 1,{_timestamp(a, True)},{_timestamp(b, True)},{style},,0,0,0,,"
-                      f"{{\\pos({x},{y})\\fs{fitted}}}{ass_text(text)}")
-
-    duration = plan["duration_seconds"]
-    for y, title in zip([395, 483] if len(plan["title_lines"]) == 2 else [439], plan["title_lines"]):
-        event(0, duration, "Title", title, 76, y=y)
-    # Keep the approved two-character placement; longer names extend to the right.
-    name_size = fit(plan["channel"], 92, 490)
-    name_width = ImageFont.truetype(str(font_path), name_size).getlength(plan["channel"])
-    event(0, duration, "Channel", plan["channel"], name_size, x=round(521 + name_width / 2), y=1650, width=490)
-    for cue in captions:
-        event(cue["start"], cue["end"], cue["style"], cue["text"], STYLES[cue["style"]])
-    for cue in plan["context"]:
-        event(cue["start"], cue["end"], "Context", cue["text"], 34, y=293)
+    events = [f"Dialogue: 1,{_timestamp(item['start'], True)},{_timestamp(item['end'], True)},{item['style']},,0,0,0,,"
+              f"{{\\pos({item['x']:g},{item['y']:g})\\fs{item['size']}}}{ass_text(item['text'])}"
+              for item in _text_layers(plan, captions, font_path)]
     ass = header + "\n".join(events) + "\n"
     srt = "\n\n".join(f"{i}\n{_timestamp(c['start'])} --> {_timestamp(c['end'])}\n{c['text']}"
                         for i, c in enumerate(captions, 1)) + "\n"
     return ass, srt
+
+
+def _visual_graph(plan, *, sequence="sequence", preview_time=None):
+    c, logo = plan["crop"], normalize_design(plan.get("design"))["logo"]
+    timing = f"setpts=PTS-STARTPTS+{preview_time:.6f}/TB," if preview_time is not None else ""
+    return [
+        f"[{sequence}]setsar=1,crop={c['width']}:{c['height']}:{c['x']}:{c['y']},"
+        "scale=1080:810:flags=lanczos,pad=1080:1920:0:555:black[canvas]",
+        f"[1:v]scale={logo['size']}:{logo['size']}:force_original_aspect_ratio=decrease,"
+        f"pad={logo['size']}:{logo['size']}:(ow-iw)/2:(oh-ih)/2:color=black@0[logo]",
+        f"[canvas][logo]overlay={logo['x']:g}:{logo['y']:g},{timing}"
+        "ass=filename=captions.ass:fontsdir=fonts,format=yuv420p[v]",
+    ]
 
 
 def _filter_graph(plan, has_audio):
@@ -217,13 +317,12 @@ def _filter_graph(plan, has_audio):
     parts.append(inputs + f"concat=n={n}:v=1:a={int(has_audio)}[sequence]" + ("[sound]" if has_audio else ""))
     if not has_audio:
         parts.append(f"anullsrc=r=48000:cl=stereo,atrim=duration={plan['duration_seconds']:.6f}[sound]")
-    c = plan["crop"]
+    parts.append("[sequence]fps=30[timed]")
+    parts.extend(_visual_graph(plan, sequence="timed"))
+    # loudnorm can emit NaNs for generated digital silence on some FFmpeg builds.
+    normalization = "loudnorm=I=-16:TP=-1.5:LRA=11," if has_audio else ""
     parts.extend([
-        f"[sequence]fps=30,setsar=1,crop={c['width']}:{c['height']}:{c['x']}:{c['y']},"
-        "scale=1080:810:flags=lanczos,pad=1080:1920:0:555:black[canvas]",
-        "[1:v]scale=156:156:force_original_aspect_ratio=decrease,pad=156:156:(ow-iw)/2:(oh-ih)/2:color=black@0[logo]",
-        "[canvas][logo]overlay=365:1572,ass=filename=captions.ass:fontsdir=fonts,format=yuv420p[v]",
-        "[sound]loudnorm=I=-16:TP=-1.5:LRA=11,aresample=48000,"
+        f"[sound]{normalization}aresample=48000,"
         f"afade=t=out:st={max(0, plan['duration_seconds']-.10):.6f}:d=0.10[a]",
     ])
     return ";".join(parts)
@@ -245,15 +344,9 @@ def _gallery(rows):
             + "".join(cards) + '</main></html>')
 
 
-def render_plan(plan_path, output_dir, *, gallery=False):
-    """Render one plan, then upsert its slug in output_dir/manifest.json.
-
-    Preparation or FFmpeg failure preserves existing outputs. Calls to the same
-    output directory must be sequential. Each published file is replaced atomically.
-    """
-    require_tools()
-    plan_path, output = Path(plan_path).resolve(), Path(output_dir).resolve()
-    gallery = bool(gallery or (output / "index.html").exists())
+def load_render_plan(plan_path):
+    """Read and validate a plan and its local assets without mutating any files."""
+    plan_path = Path(plan_path).resolve()
     raw = read(plan_path)
     if not isinstance(raw, dict):
         raise ValueError("편집 계획은 JSON 객체여야 합니다.")
@@ -267,6 +360,70 @@ def render_plan(plan_path, output_dir, *, gallery=False):
         raise ValueError("회전 메타데이터가 있는 원본은 먼저 회전을 적용한 영상으로 변환하세요.")
     plan = validate_plan(raw, source_duration=float(video.get("duration") or source_info["format"]["duration"]),
                          source_width=video["width"], source_height=video["height"])
+    return plan, files, source_info
+
+
+def _source_time(plan, output_time):
+    cursor = 0.0
+    for start, end in plan["keep"]:
+        length = end - start
+        if output_time < cursor + length:
+            return start + output_time - cursor
+        cursor += length
+    raise ValueError("미리보기 시각은 완성 영상의 길이 미만이어야 합니다.")
+
+
+def render_preview(plan_path, output_path, time_seconds=0):
+    """Render one PNG using the same crop, logo, font and ASS as the MP4 renderer.
+
+    ``time_seconds`` is on the edited output timeline, not the original source.
+    Existing preview files survive validation and FFmpeg failures.
+    """
+    require_tools()
+    plan_path, output = Path(plan_path).resolve(), Path(output_path).resolve()
+    if output.suffix.lower() != ".png":
+        raise ValueError("미리보기 출력은 .png 파일이어야 합니다.")
+    plan, files, _ = load_render_plan(plan_path)
+    moment = _number(time_seconds, "preview time")
+    layout = preview_layout(plan, files["font"], moment)
+    source_time = _source_time(plan, moment)
+    protected = [plan_path, *files.values()]
+    if output in protected or (output.exists() and any(output.samefile(p) for p in protected)):
+        raise ValueError("출력 파일이 편집 계획 또는 입력 파일과 같습니다. 다른 출력 파일을 지정하세요.")
+    ass, _ = _subtitles(plan, transform_captions(plan), files["font"])
+    output.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix=".preview-", dir=output.parent) as temporary:
+        stage = Path(temporary)
+        (stage / "fonts").mkdir()
+        shutil.copy2(files["font"], stage / "fonts" / ("provided" + files["font"].suffix))
+        (stage / "captions.ass").write_text(ass, encoding="utf-8-sig")
+        args = ["ffmpeg", "-hide_banner", "-loglevel", "warning", "-nostdin", "-y", "-ss",
+                f"{source_time-plan['source_start']:.6f}", "-i", str(files["source"]), "-i", str(files["logo"]),
+                "-filter_complex", ";".join(_visual_graph(plan, sequence="0:v", preview_time=moment)),
+                "-map", "[v]", "-an", "-frames:v", "1", "-fps_mode", "passthrough", "-update", "1",
+                str(stage / "preview.png")]
+        result = subprocess.run(args, cwd=stage, capture_output=True, encoding="utf-8", errors="replace")
+        if result.returncode or not (stage / "preview.png").is_file():
+            raise RuntimeError(f"FFmpeg 미리보기 실패 (이전 출력 보존):\n{result.stderr[-5000:]}")
+        from PIL import Image
+        with Image.open(stage / "preview.png") as image:
+            if image.size != (1080, 1920):
+                raise RuntimeError("미리보기 해상도 검증에 실패했습니다. 이전 출력은 보존했습니다.")
+            image.verify()
+        (stage / "preview.png").replace(output)
+    return {**layout, "width": 1080, "height": 1920, "time_seconds": moment, "source_time": source_time}
+
+
+def render_plan(plan_path, output_dir, *, gallery=False):
+    """Render one plan, then upsert its slug in output_dir/manifest.json.
+
+    Preparation or FFmpeg failure preserves existing outputs. Calls to the same
+    output directory must be sequential. Each published file is replaced atomically.
+    """
+    require_tools()
+    plan_path, output = Path(plan_path).resolve(), Path(output_dir).resolve()
+    gallery = bool(gallery or (output / "index.html").exists())
+    plan, files, source_info = load_render_plan(plan_path)
     slug = plan["slug"]
     names = [f"{slug}.mp4", f"{slug}.ass", f"{slug}.ko.srt", f"{slug}.json", "manifest.json"]
     if gallery:

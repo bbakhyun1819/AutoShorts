@@ -19,3 +19,6 @@ chzzk-demo = "chzzk_demo.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+chzzk_demo = ["editor_ui.html", "library_ui.html"]

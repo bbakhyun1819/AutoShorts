@@ -30,7 +30,10 @@ def text_candidates(args):
     config = read(job / "job.json")
     words = read(job / "transcript.json")
     client, model = client_and_model()
-    folder = job / "ai-text" / fingerprint([model, words, "prompt-v1"])
+    request_path = job / "studio-request.json"
+    request = read(request_path) if request_path.is_file() else None
+    cache_key = [model, words, "prompt-v1"] if request is None else [model, words, "prompt-v2", request]
+    folder = job / "ai-text" / fingerprint(cache_key)
     folder.mkdir(parents=True, exist_ok=True)
     items = []
     rejected = []
@@ -55,6 +58,8 @@ def text_candidates(args):
                 f"start/end는 {a}~{b} 범위, 각 후보 10~180초. 채팅 없는 이야기도 포함. "
                 "최대 5개, 없으면 빈 배열. 전후 맥락 부족은 reason에 명시.\n"
                 + json.dumps(segment, ensure_ascii=False))
+            if request:
+                prompt += "\n사용자의 제작 선호(후보 10~180초 제한 내에서 반영):\n" + json.dumps(request, ensure_ascii=False)
             result = ask(client, model, prompt)
             save(path, result)
         for item in result.get("candidates", []):
@@ -75,7 +80,13 @@ def text_candidates(args):
 def review_video(args):
     job = Path(args.job)
     client, model = client_and_model()
-    for item in read(job / "candidates.json")[:args.limit]:
+    candidates = read(job / "candidates.json")
+    selected = getattr(args, "candidate_id", None)
+    if selected:
+        if set(selected) - {item["id"] for item in candidates}:
+            raise ValueError("목록에 없는 후보 ID입니다.")
+        candidates = [item for item in candidates if item["id"] in selected]
+    for item in candidates[:args.limit]:
         video = job / "clips" / f"{item['id']}.mp4"
         if not video.exists():
             continue
